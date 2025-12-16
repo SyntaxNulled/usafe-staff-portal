@@ -2,6 +2,7 @@ const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
 const path = require('path');
+const fetch = require('node-fetch'); // NEW: for Roblox API calls
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -70,6 +71,15 @@ db.serialize(() => {
       FOREIGN KEY(medal_id) REFERENCES medals(id),
       FOREIGN KEY(user_id) REFERENCES users(id),
       FOREIGN KEY(awarded_by) REFERENCES users(id)
+    )
+  `);
+
+  // NEW: temporary verification codes table
+  db.run(`
+    CREATE TABLE IF NOT EXISTS verification_codes (
+      roblox_id TEXT PRIMARY KEY,
+      code TEXT,
+      expires_at TEXT
     )
   `);
 });
@@ -264,6 +274,162 @@ app.get('/api/status', (req, res) => {
       }
     );
   });
+});
+
+// ===============================
+// ROBLOX VERIFICATION LOGIN
+// ===============================
+
+// Helper: generate verification code
+function generateVerificationCode() {
+  return 'USAFE-' + Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+// 1) Lookup Roblox user by username
+app.post('/api/roblox/lookup', async (req, res) => {
+  const { username } = req.body;
+
+  if (!username) return res.status(400).json({ error: 'Username is required' });
+
+  try {
+    const response = await fetch('https://users.roblox.com/v1/usernames/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        usernames: [username],
+        excludeBannedUsers: true
+      })
+    });
+
+    const data = await response.json();
+
+    if (!data.data || !data.data[0]) {
+      return res.status(404).json({ error: 'Roblox user not found' });
+    }
+
+    const user = data.data[0];
+
+    res.json({
+      roblox_id: user.id.toString(),
+      username: user.name,
+      display_name: user.displayName
+    });
+  } catch (err) {
+    console.error('Roblox lookup error:', err);
+    res.status(500).json({ error: 'Failed to contact Roblox' });
+  }
+});
+
+// 2) Start verification: generate and store code
+app.post('/api/roblox/start-verification', (req, res) => {
+  const { roblox_id } = req.body;
+
+  if (!roblox_id) return res.status(400).json({ error: 'roblox_id is required' });
+
+  const code = generateVerificationCode();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
+
+  db.run(
+    `
+    INSERT INTO verification_codes (roblox_id, code, expires_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(roblox_id) DO UPDATE SET
+      code = excluded.code,
+      expires_at = excluded.expires_at
+  `,
+    [roblox_id, code, expiresAt],
+    function (err) {
+      if (err) {
+        console.error('Failed to store verification code:', err);
+        return res.status(500).json({ error: 'Failed to start verification' });
+      }
+
+      res.json({
+        success: true,
+        code
+      });
+    }
+  );
+});
+
+// 3) Check verification: read Roblox bio and confirm code
+app.post('/api/roblox/check', async (req, res) => {
+  const { roblox_id } = req.body;
+
+  if (!roblox_id) return res.status(400).json({ error: 'roblox_id is required' });
+
+  db.get(
+    `SELECT code, expires_at FROM verification_codes WHERE roblox_id = ?`,
+    [roblox_id],
+    async (err, row) => {
+      if (err || !row) {
+        return res.status(400).json({ error: 'No verification code found for this user' });
+      }
+
+      const { code, expires_at } = row;
+      const now = new Date();
+
+      if (new Date(expires_at) < now) {
+        return res.status(400).json({ error: 'Verification code expired' });
+      }
+
+      try {
+        const response = await fetch(`https://users.roblox.com/v1/users/${roblox_id}`);
+        if (!response.ok) {
+          return res.status(500).json({ error: 'Failed to fetch Roblox user profile' });
+        }
+
+        const userData = await response.json();
+        const description = userData.description || '';
+
+        if (!description.includes(code)) {
+          return res.status(400).json({ error: 'Verification code not found in Roblox bio' });
+        }
+
+        // Verified. Upsert user into users table.
+        const username = userData.name;
+        const display_name = userData.displayName;
+
+        db.run(
+          `
+          INSERT INTO users (roblox_id, username, display_name)
+          VALUES (?, ?, ?)
+          ON CONFLICT(roblox_id) DO UPDATE SET
+            username = excluded.username,
+            display_name = excluded.display_name
+        `,
+          [roblox_id, username, display_name],
+          function (upsertErr) {
+            if (upsertErr) {
+              console.error('Failed to upsert verified user:', upsertErr);
+              return res.status(500).json({ error: 'Failed to save user' });
+            }
+
+            // Optionally delete the verification code
+            db.run(
+              `DELETE FROM verification_codes WHERE roblox_id = ?`,
+              [roblox_id],
+              () => {}
+            );
+
+            // Simple "token" – for now just echo roblox_id; frontend will store it
+            const token = `roblox_${roblox_id}_${Date.now()}`;
+
+            res.json({
+              success: true,
+              token,
+              roblox_id,
+              username,
+              display_name
+            });
+          }
+        );
+      } catch (e) {
+        console.error('Roblox check error:', e);
+        res.status(500).json({ error: 'Failed to verify with Roblox' });
+      }
+    }
+  );
 });
 
 // ===============================
