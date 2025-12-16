@@ -2,7 +2,7 @@ const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
 const path = require('path');
-const fetch = require('node-fetch'); // NEW: for Roblox API calls
+const fetch = require('node-fetch'); // Required for Roblox API
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -74,7 +74,7 @@ db.serialize(() => {
     )
   `);
 
-  // NEW: temporary verification codes table
+  // Roblox verification codes
   db.run(`
     CREATE TABLE IF NOT EXISTS verification_codes (
       roblox_id TEXT PRIMARY KEY,
@@ -280,12 +280,12 @@ app.get('/api/status', (req, res) => {
 // ROBLOX VERIFICATION LOGIN
 // ===============================
 
-// Helper: generate verification code
+// Generate verification code
 function generateVerificationCode() {
   return 'USAFE-' + Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// 1) Lookup Roblox user by username
+// 1) Lookup Roblox user
 app.post('/api/roblox/lookup', async (req, res) => {
   const { username } = req.body;
 
@@ -320,7 +320,7 @@ app.post('/api/roblox/lookup', async (req, res) => {
   }
 });
 
-// 2) Start verification: generate and store code
+// 2) Start verification
 app.post('/api/roblox/start-verification', (req, res) => {
   const { roblox_id } = req.body;
 
@@ -352,7 +352,7 @@ app.post('/api/roblox/start-verification', (req, res) => {
   );
 });
 
-// 3) Check verification: read Roblox bio and confirm code
+// 3) Check verification
 app.post('/api/roblox/check', async (req, res) => {
   const { roblox_id } = req.body;
 
@@ -386,7 +386,7 @@ app.post('/api/roblox/check', async (req, res) => {
           return res.status(400).json({ error: 'Verification code not found in Roblox bio' });
         }
 
-        // Verified. Upsert user into users table.
+        // Verified. Upsert user.
         const username = userData.name;
         const display_name = userData.displayName;
 
@@ -405,14 +405,14 @@ app.post('/api/roblox/check', async (req, res) => {
               return res.status(500).json({ error: 'Failed to save user' });
             }
 
-            // Optionally delete the verification code
+            // Delete verification code
             db.run(
               `DELETE FROM verification_codes WHERE roblox_id = ?`,
               [roblox_id],
               () => {}
             );
 
-            // Simple "token" – for now just echo roblox_id; frontend will store it
+            // Simple token
             const token = `roblox_${roblox_id}_${Date.now()}`;
 
             res.json({
