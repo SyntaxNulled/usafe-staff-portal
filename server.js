@@ -1,549 +1,576 @@
+// ======================================
+// USAFFE BACKEND - FULL server.js
+// ======================================
+//
+// Requirements (install with npm):
+//   npm install express cors sqlite3 axios
+//
+// Then run:
+//   node server.js
+//
+// The API base URL you’ve been using from frontend:
+//   https://usafe-backend.onrender.com  (on Render)
+//
+
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
+const sqlite3 = require('sqlite3').verbose();
+const axios = require('axios');
 const path = require('path');
-const fetch = require('node-fetch');
+const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+// =============================
+// MIDDLEWARE
+// =============================
 app.use(cors());
 app.use(express.json());
 
-// ===============================
-// DATABASE SETUP
-// ===============================
-const dbPath = path.join(__dirname, 'usafe.db');
-const db = new sqlite3.Database(dbPath);
+// =============================
+// DATABASE INITIALIZATION
+// =============================
+const db = new sqlite3.Database('./usafe.db');
 
 db.serialize(() => {
-  // Core tables
+  // Users table
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       roblox_id TEXT UNIQUE,
       username TEXT,
       display_name TEXT,
-      branch TEXT,
       rank TEXT,
       combat_points INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      created_at TEXT DEFAULT (datetime('now'))
     )
   `);
 
+  // Medals table
+  db.run(`
+    CREATE TABLE IF NOT EXISTS medals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_roblox_id TEXT,
+      medal_id INTEGER,
+      medal_name TEXT,
+      reason TEXT,
+      date TEXT DEFAULT (datetime('now')),
+      awarded_by_roblox_id TEXT
+    )
+  `);
+
+  // Trainings table
   db.run(`
     CREATE TABLE IF NOT EXISTS trainings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       type TEXT,
       date TEXT,
-      host_id INTEGER,
-      FOREIGN KEY(host_id) REFERENCES users(id)
+      host_id TEXT
     )
   `);
 
+  // Training attendees
   db.run(`
-    CREATE TABLE IF NOT EXISTS training_attendance (
+    CREATE TABLE IF NOT EXISTS training_attendees (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       training_id INTEGER,
-      user_id INTEGER,
-      FOREIGN KEY(training_id) REFERENCES trainings(id),
-      FOREIGN KEY(user_id) REFERENCES users(id)
+      attendee_roblox_id TEXT
     )
   `);
 
+  // Admin keys table (12-hour keys)
   db.run(`
-    CREATE TABLE IF NOT EXISTS medals (
+    CREATE TABLE IF NOT EXISTS admin_keys (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT,
-      description TEXT
+      key TEXT UNIQUE,
+      created_at TEXT,
+      expires_at TEXT,
+      used INTEGER DEFAULT 0
     )
   `);
+});
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS medal_awards (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      medal_id INTEGER,
-      user_id INTEGER,
-      awarded_by INTEGER,
-      date TEXT,
-      reason TEXT,
-      FOREIGN KEY(medal_id) REFERENCES medals(id),
-      FOREIGN KEY(user_id) REFERENCES users(id),
-      FOREIGN KEY(awarded_by) REFERENCES users(id)
-    )
-  `);
+// =============================
+// BASIC HELPERS
+// =============================
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS verification_codes (
-      roblox_id TEXT PRIMARY KEY,
-      code TEXT,
-      expires_at TEXT
-    )
-  `);
+function getUserByIdOrRobloxId(idOrRobloxId, cb) {
+  // If it’s all digits and relatively long, treat as roblox_id; otherwise allow both
+  db.get(
+    `
+    SELECT *
+    FROM users
+    WHERE roblox_id = ?
+       OR id = ?
+  `,
+    [idOrRobloxId, idOrRobloxId],
+    cb
+  );
+}
 
-  // --- Lightweight migration: ensure combat_points column exists ---
-  db.all(`PRAGMA table_info(users)`, (err, rows) => {
-    if (err) {
-      console.error('Failed to inspect users table:', err);
-      return;
-    }
+function ensureUserByRobloxProfile(robloxId, username, displayName, cb) {
+  db.get(
+    `SELECT * FROM users WHERE roblox_id = ?`,
+    [robloxId],
+    (err, row) => {
+      if (err) return cb(err);
 
-    const hasCombatPoints = rows.some(col => col.name === 'combat_points');
+      if (row) return cb(null, row);
 
-    if (!hasCombatPoints) {
-      console.log('Adding combat_points column to users table...');
       db.run(
-        `ALTER TABLE users ADD COLUMN combat_points INTEGER DEFAULT 0`,
-        (alterErr) => {
-          if (alterErr) {
-            console.error('Failed to add combat_points column:', alterErr);
-          } else {
-            console.log('combat_points column added.');
-          }
+        `
+        INSERT INTO users (roblox_id, username, display_name, rank, combat_points)
+        VALUES (?, ?, ?, ?, ?)
+      `,
+        [robloxId, username || '', displayName || '', 'Unassigned', 0],
+        function (insertErr) {
+          if (insertErr) return cb(insertErr);
+          db.get(
+            `SELECT * FROM users WHERE id = ?`,
+            [this.lastID],
+            cb
+          );
         }
       );
-    }
-  });
-});
-
-// ===============================
-// BASIC ROUTE
-// ===============================
-app.get('/', (req, res) => {
-  res.json({ message: 'USAFE backend running' });
-});
-
-// ===============================
-// AVATAR PROXY (Fixes Roblox CORS)
-// ===============================
-app.get('/api/avatar/:robloxId', async (req, res) => {
-  const { robloxId } = req.params;
-
-  const url = `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${robloxId}&size=150x150&format=Png&isCircular=false`;
-
-  try {
-    const response = await fetch(url);
-    const data = await response.json();
-
-    const imageUrl = data?.data?.[0]?.imageUrl;
-
-    if (!imageUrl) {
-      return res.status(404).json({ error: 'Avatar not found' });
-    }
-
-    res.json({ imageUrl });
-  } catch (err) {
-    console.error('Avatar proxy failed:', err);
-    res.status(500).json({ error: 'Failed to fetch avatar' });
-  }
-});
-
-// ===============================
-// HELPER: RESOLVE INTERNAL USER ID
-// Accepts either internal ID or roblox_id
-// ===============================
-function resolveInternalUserId(idOrRoblox, callback) {
-  if (!idOrRoblox && idOrRoblox !== 0) {
-    return callback(new Error('No identifier provided'));
-  }
-
-  db.get(
-    `SELECT id FROM users WHERE id = ? OR roblox_id = ?`,
-    [idOrRoblox, idOrRoblox.toString()],
-    (err, row) => {
-      if (err) return callback(err);
-      if (!row) return callback(new Error('User not found'));
-      callback(null, row.id);
     }
   );
 }
 
-// ===============================
-// USER PROFILE
-// ===============================
-// Used by profile page: returns rank, combat_points, medals, trainings
-app.get('/api/users/:robloxId', (req, res) => {
+// =============================
+// AVATAR PROXY
+// =============================
+// GET /api/avatar/:robloxId
+app.get('/api/avatar/:robloxId', async (req, res) => {
   const { robloxId } = req.params;
+  try {
+    // Roblox avatar thumbnail API
+    const resp = await axios.get(
+      'https://thumbnails.roblox.com/v1/users/avatar-headshot',
+      {
+        params: {
+          userIds: robloxId,
+          size: '150x150',
+          format: 'Png',
+          isCircular: 'true'
+        }
+      }
+    );
 
-  const sql = `
-    SELECT u.*,
-      (SELECT json_group_array(json_object(
-          'id', ma.id,
-          'medal_name', m.name,
-          'date', ma.date,
-          'reason', ma.reason
-        ))
-        FROM medal_awards ma
-        JOIN medals m ON ma.medal_id = m.id
-        WHERE ma.user_id = u.id
-      ) AS medals,
-      (SELECT json_group_array(json_object(
-          'training_id', t.id,
-          'type', t.type,
-          'date', t.date
-        ))
-        FROM training_attendance ta
-        JOIN trainings t ON ta.training_id = t.id
-        WHERE ta.user_id = u.id
-      ) AS trainings
-    FROM users u
-    WHERE u.roblox_id = ?
-  `;
+    const data = resp.data;
+    const imageUrl =
+      data &&
+      data.data &&
+      data.data[0] &&
+      data.data[0].imageUrl
+        ? data.data[0].imageUrl
+        : null;
 
-  db.get(sql, [robloxId], (err, row) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    if (!row) return res.status(404).json({ error: 'User not found' });
+    if (!imageUrl) {
+      return res.json({ imageUrl: null });
+    }
 
-    res.json({
-      id: row.id,
-      roblox_id: row.roblox_id,
-      username: row.username,
-      display_name: row.display_name,
-      branch: row.branch,
-      rank: row.rank,
-      combat_points: row.combat_points || 0,
-      medals: row.medals ? JSON.parse(row.medals) : [],
-      trainings: row.trainings ? JSON.parse(row.trainings) : []
-    });
+    res.json({ imageUrl });
+  } catch (err) {
+    console.error('Avatar proxy error:', err.message);
+    res.json({ imageUrl: null });
+  }
+});
+
+// =============================
+// USER ROUTES
+// =============================
+
+// GET /api/users/:idOrRobloxId
+app.get('/api/users/:idOrRobloxId', (req, res) => {
+  const { idOrRobloxId } = req.params;
+  getUserByIdOrRobloxId(idOrRobloxId, (err, user) => {
+    if (err) {
+      console.error('User lookup error:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Fetch medals and trainings for this user
+    db.all(
+      `SELECT * FROM medals WHERE user_roblox_id = ? ORDER BY date DESC`,
+      [user.roblox_id],
+      (mErr, medals) => {
+        if (mErr) {
+          console.error('Medals lookup error:', mErr);
+          return res.status(500).json({ error: 'Database error' });
+        }
+
+        db.all(
+          `
+          SELECT t.*
+          FROM trainings t
+          JOIN training_attendees a ON a.training_id = t.id
+          WHERE a.attendee_roblox_id = ?
+          ORDER BY t.date DESC
+        `,
+          [user.roblox_id],
+          (tErr, trainings) => {
+            if (tErr) {
+              console.error('Trainings lookup error:', tErr);
+              return res.status(500).json({ error: 'Database error' });
+            }
+
+            res.json({
+              ...user,
+              medals,
+              trainings
+            });
+          }
+        );
+      }
+    );
   });
 });
 
-// ===============================
-// STAFF PANEL ROUTES
-// ===============================
+// POST /api/users/:idOrRobloxId/adjust
+// Body: { combatDelta }
+app.post('/api/users/:idOrRobloxId/adjust', (req, res) => {
+  const { idOrRobloxId } = req.params;
+  const { combatDelta } = req.body;
 
-// Create training (original)
-app.post('/api/trainings', (req, res) => {
-  const { type, date, host_id } = req.body;
+  if (typeof combatDelta !== 'number') {
+    return res.status(400).json({ error: 'combatDelta must be a number' });
+  }
 
-  db.run(
-    `INSERT INTO trainings (type, date, host_id) VALUES (?, ?, ?)`,
-    [type, date, host_id],
-    function (err) {
-      if (err) return res.status(500).json({ error: 'Failed to create training' });
-      res.json({ success: true, training_id: this.lastID });
+  getUserByIdOrRobloxId(idOrRobloxId, (err, user) => {
+    if (err) {
+      console.error('User lookup error:', err);
+      return res.status(500).json({ error: 'Database error' });
     }
-  );
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const newCombat = (user.combat_points || 0) + combatDelta;
+    db.run(
+      `UPDATE users SET combat_points = ? WHERE id = ?`,
+      [newCombat, user.id],
+      (uErr) => {
+        if (uErr) {
+          console.error('Combat update error:', uErr);
+          return res.status(500).json({ error: 'Database error' });
+        }
+        res.json({ success: true, new_combat_points: newCombat });
+      }
+    );
+  });
 });
 
-// Create training (alias to match frontend /api/trainings/create)
+// POST /api/users/:idOrRobloxId/promote
+// Body: { newRank }
+app.post('/api/users/:idOrRobloxId/promote', (req, res) => {
+  const { idOrRobloxId } = req.params;
+  const { newRank } = req.body;
+
+  if (!newRank) {
+    return res.status(400).json({ error: 'newRank is required' });
+  }
+
+  getUserByIdOrRobloxId(idOrRobloxId, (err, user) => {
+    if (err) {
+      console.error('User lookup error:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    db.run(
+      `UPDATE users SET rank = ? WHERE id = ?`,
+      [newRank, user.id],
+      (uErr) => {
+        if (uErr) {
+          console.error('Rank update error:', uErr);
+          return res.status(500).json({ error: 'Database error' });
+        }
+        res.json({ success: true, rank: newRank });
+      }
+    );
+  });
+});
+
+// =============================
+// TRAININGS
+// =============================
+
+// POST /api/trainings/create
+// Body: { type, date, host_id }
 app.post('/api/trainings/create', (req, res) => {
   const { type, date, host_id } = req.body;
 
+  if (!type || !date || !host_id) {
+    return res.status(400).json({ error: 'type, date, and host_id are required' });
+  }
+
   db.run(
-    `INSERT INTO trainings (type, date, host_id) VALUES (?, ?, ?)`,
+    `
+    INSERT INTO trainings (type, date, host_id)
+    VALUES (?, ?, ?)
+  `,
     [type, date, host_id],
     function (err) {
-      if (err) return res.status(500).json({ error: 'Failed to create training' });
-      res.json({ success: true, training_id: this.lastID });
+      if (err) {
+        console.error('Training create error:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+      res.json({
+        training_id: this.lastID,
+        type,
+        date,
+        host_id
+      });
     }
   );
 });
 
-// Add attendees (attendees can be internal IDs or Roblox IDs)
+// POST /api/trainings/:trainingId/attendees
+// Body: { attendees: [ "robloxId1", "robloxId2", ... ] }
 app.post('/api/trainings/:trainingId/attendees', (req, res) => {
   const { trainingId } = req.params;
   const { attendees } = req.body;
 
   if (!Array.isArray(attendees) || attendees.length === 0) {
-    return res.status(400).json({ error: 'Attendees array required' });
+    return res.status(400).json({ error: 'attendees must be a non-empty array' });
   }
 
-  const stmt = db.prepare(
-    `INSERT INTO training_attendance (training_id, user_id) VALUES (?, ?)`
-  );
-
-  let pending = attendees.length;
-  let hadError = false;
-
-  attendees.forEach(rawId => {
-    if (!rawId) {
-      pending--;
-      if (pending === 0 && !hadError) {
-        stmt.finalize();
-        res.json({ success: true });
-      }
-      return;
+  db.get(`SELECT * FROM trainings WHERE id = ?`, [trainingId], (err, tRow) => {
+    if (err) {
+      console.error('Training lookup error:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (!tRow) {
+      return res.status(404).json({ error: 'Training not found' });
     }
 
-    resolveInternalUserId(rawId, (err, internalId) => {
-      if (err) {
-        console.warn('Failed to resolve user for training attendee:', rawId);
-      } else {
-        stmt.run(trainingId, internalId);
-      }
+    const stmt = db.prepare(`
+      INSERT INTO training_attendees (training_id, attendee_roblox_id)
+      VALUES (?, ?)
+    `);
 
-      pending--;
-      if (pending === 0 && !hadError) {
-        stmt.finalize(e => {
-          if (e) return res.status(500).json({ error: 'Failed to add attendees' });
-          res.json({ success: true });
-        });
+    attendees.forEach(a => {
+      stmt.run([trainingId, a]);
+    });
+
+    stmt.finalize((fErr) => {
+      if (fErr) {
+        console.error('Attendee insert error:', fErr);
+        return res.status(500).json({ error: 'Database error' });
       }
+      res.json({ success: true });
     });
   });
 });
 
-// Award medal
-// Accepts:
-//  - user_id / awarded_by as INTERNAL IDs
-//     OR
-//  - user_roblox_id / awarded_by_roblox_id as Roblox IDs
+// =============================
+// MEDALS
+// =============================
+
+// POST /api/medals/award
+// Body: { medal_id, user_roblox_id, awarded_by_roblox_id, reason }
 app.post('/api/medals/award', (req, res) => {
-  const {
-    medal_id,
-    user_id,
-    awarded_by,
-    user_roblox_id,
-    awarded_by_roblox_id,
-    reason
-  } = req.body;
+  const { medal_id, user_roblox_id, awarded_by_roblox_id, reason } = req.body;
 
-  const date = new Date().toISOString();
-
-  if (!medal_id || !reason) {
-    return res.status(400).json({ error: 'medal_id and reason are required' });
+  if (!medal_id || !user_roblox_id || !awarded_by_roblox_id || !reason) {
+    return res
+      .status(400)
+      .json({ error: 'medal_id, user_roblox_id, awarded_by_roblox_id, and reason are required' });
   }
 
-  const userIdSource = user_id || user_roblox_id;
-  const awardedBySource = awarded_by || awarded_by_roblox_id;
-
-  if (!userIdSource || !awardedBySource) {
-    return res.status(400).json({ error: 'User and awarded_by identifiers are required' });
-  }
-
-  resolveInternalUserId(userIdSource, (err, internalUserId) => {
-    if (err) return res.status(400).json({ error: 'Target user not found' });
-
-    resolveInternalUserId(awardedBySource, (err2, internalAwardedById) => {
-      if (err2) return res.status(400).json({ error: 'Awarding user not found' });
-
-      db.run(
-        `INSERT INTO medal_awards (medal_id, user_id, awarded_by, date, reason)
-         VALUES (?, ?, ?, ?, ?)`,
-        [medal_id, internalUserId, internalAwardedById, date, reason],
-        function (err3) {
-          if (err3) {
-            console.error('Failed to award medal:', err3);
-            return res.status(500).json({ error: 'Failed to award medal' });
-          }
-          res.json({ success: true });
-        }
-      );
-    });
-  });
-});
-
-// Adjust combat points
-// Path param can be INTERNAL ID or Roblox ID
-// Body expects: { combatDelta: number }
-// Also accepts legacy { pointsDelta } for safety.
-app.post('/api/users/:userId/adjust', (req, res) => {
-  const { userId } = req.params;
-  const { combatDelta, pointsDelta } = req.body;
-
-  const delta = Number(
-    combatDelta !== undefined ? combatDelta : (pointsDelta !== undefined ? pointsDelta : 0)
-  );
-
-  if (Number.isNaN(delta)) {
-    return res.status(400).json({ error: 'combatDelta must be a number' });
-  }
-
-  resolveInternalUserId(userId, (err, internalId) => {
-    if (err) return res.status(400).json({ error: 'User not found' });
-
-    db.run(
-      `UPDATE users SET combat_points = combat_points + ? WHERE id = ?`,
-      [delta, internalId],
-      function (err2) {
-        if (err2) return res.status(500).json({ error: 'Failed to adjust combat points' });
-        res.json({ success: true });
-      }
-    );
-  });
-});
-
-// Promote user
-// Path param can be INTERNAL ID or Roblox ID
-app.post('/api/users/:userId/promote', (req, res) => {
-  const { userId } = req.params;
-  const { newRank } = req.body;
-
-  if (!newRank) return res.status(400).json({ error: 'newRank is required' });
-
-  resolveInternalUserId(userId, (err, internalId) => {
-    if (err) return res.status(400).json({ error: 'User not found' });
-
-    db.run(
-      `UPDATE users SET rank = ? WHERE id = ?`,
-      [newRank, internalId],
-      function (err2) {
-        if (err2) return res.status(500).json({ error: 'Failed to promote user' });
-        res.json({ success: true });
-      }
-    );
-  });
-});
-
-// ===============================
-// COMMAND STATUS (for Staff Panel)
-// ===============================
-app.get('/api/admin/stats', (req, res) => {
-  const today = new Date().toISOString().split('T')[0];
-  const status = {};
-
-  db.get(`SELECT COUNT(*) AS count FROM users`, (err, row) => {
-    status.active_personnel = row ? row.count : 0;
-
-    db.get(
-      `SELECT COUNT(*) AS count FROM trainings WHERE date LIKE ?`,
-      [`${today}%`],
-      (err2, row2) => {
-        status.trainings_today = row2 ? row2.count : 0;
-
-        db.get(`SELECT COUNT(*) AS count FROM medal_awards`, (err3, row3) => {
-          status.medals_awarded = row3 ? row3.count : 0;
-
-          res.json(status);
-        });
-      }
-    );
-  });
-});
-
-// ===============================
-// ROBLOX BIO VERIFICATION LOGIN
-// ===============================
-function generateVerificationCode() {
-  return 'USAFE-' + Math.random().toString(36).substring(2, 8).toUpperCase();
-}
-
-// 1) Lookup Roblox user
-app.post('/api/roblox/lookup', async (req, res) => {
-  const { username } = req.body;
-
-  if (!username) return res.status(400).json({ error: 'Username is required' });
-
-  try {
-    const response = await fetch('https://users.roblox.com/v1/usernames/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        usernames: [username],
-        excludeBannedUsers: true
-      })
-    });
-
-    const data = await response.json();
-
-    if (!data.data || !data.data[0]) {
-      return res.status(404).json({ error: 'Roblox user not found' });
-    }
-
-    const user = data.data[0];
-
-    res.json({
-      roblox_id: user.id.toString(),
-      username: user.name,
-      display_name: user.displayName
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to contact Roblox' });
-  }
-});
-
-// 2) Start verification
-app.post('/api/roblox/start-verification', (req, res) => {
-  const { roblox_id } = req.body;
-
-  if (!roblox_id) return res.status(400).json({ error: 'roblox_id is required' });
-
-  const code = generateVerificationCode();
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  // For now we just store medal_id as given and a generic name based on ID
+  const medalName = `Medal #${medal_id}`;
 
   db.run(
     `
-    INSERT INTO verification_codes (roblox_id, code, expires_at)
-    VALUES (?, ?, ?)
-    ON CONFLICT(roblox_id) DO UPDATE SET
-      code = excluded.code,
-      expires_at = excluded.expires_at
+    INSERT INTO medals (user_roblox_id, medal_id, medal_name, reason, awarded_by_roblox_id)
+    VALUES (?, ?, ?, ?, ?)
   `,
-    [roblox_id, code, expiresAt],
+    [user_roblox_id, medal_id, medalName, reason, awarded_by_roblox_id],
     function (err) {
-      if (err) return res.status(500).json({ error: 'Failed to start verification' });
-
-      res.json({ success: true, code });
+      if (err) {
+        console.error('Medal award error:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+      res.json({ success: true, medal_record_id: this.lastID });
     }
   );
 });
 
-// 3) Check verification
-app.post('/api/roblox/check', async (req, res) => {
-  const { roblox_id } = req.body;
+// =============================
+// COMMAND STATS
+// =============================
 
-  if (!roblox_id) return res.status(400).json({ error: 'roblox_id is required' });
+// GET /api/admin/stats
+app.get('/api/admin/stats', (req, res) => {
+  const stats = {
+    active_personnel: 0,
+    trainings_today: 0,
+    medals_awarded: 0
+  };
 
-  db.get(
-    `SELECT code, expires_at FROM verification_codes WHERE roblox_id = ?`,
-    [roblox_id],
-    async (err, row) => {
-      if (err || !row) {
-        return res.status(400).json({ error: 'No verification code found' });
-      }
+  // active_personnel = count of users
+  db.get(`SELECT COUNT(*) as cnt FROM users`, (err, row) => {
+    if (!err && row) stats.active_personnel = row.cnt || 0;
 
-      const { code, expires_at } = row;
+    // trainings_today
+    db.get(
+      `
+      SELECT COUNT(*) as cnt
+      FROM trainings
+      WHERE DATE(date) = DATE('now')
+    `,
+      (tErr, tRow) => {
+        if (!tErr && tRow) stats.trainings_today = tRow.cnt || 0;
 
-      if (new Date(expires_at) < new Date()) {
-        return res.status(400).json({ error: 'Verification code expired' });
-      }
-
-      try {
-        const response = await fetch(`https://users.roblox.com/v1/users/${roblox_id}`);
-        const userData = await response.json();
-        const bio = userData.description || '';
-
-        if (!bio.includes(code)) {
-          return res.status(400).json({ error: 'Code not found in Roblox bio' });
-        }
-
-        const username = userData.name;
-        const display_name = userData.displayName;
-
-        db.run(
-          `
-          INSERT INTO users (roblox_id, username, display_name)
-          VALUES (?, ?, ?)
-          ON CONFLICT(roblox_id) DO UPDATE SET
-            username = excluded.username,
-            display_name = excluded.display_name
-        `,
-          [roblox_id, username, display_name],
-          function () {
-            db.run(`DELETE FROM verification_codes WHERE roblox_id = ?`, [roblox_id]);
-
-            const token = `roblox_${roblox_id}_${Date.now()}`;
-
-            res.json({
-              success: true,
-              token,
-              roblox_id,
-              username,
-              display_name
-            });
+        // medals_awarded (total)
+        db.get(
+          `SELECT COUNT(*) as cnt FROM medals`,
+          (mErr, mRow) => {
+            if (!mErr && mRow) stats.medals_awarded = mRow.cnt || 0;
+            res.json(stats);
           }
         );
-      } catch (e) {
-        res.status(500).json({ error: 'Failed to verify with Roblox' });
       }
+    );
+  });
+});
+
+// =============================
+// ADMIN KEY + SESSION SYSTEM
+// =============================
+
+const { randomUUID } = require('crypto');
+const ADMIN_SESSIONS = new Map(); // token -> { key, createdAt }
+
+// POST /api/admin-keys/create
+// Generates a new 12-hour key
+app.post('/api/admin-keys/create', (req, res) => {
+  const key = randomUUID(); // e.g. 6b29c8ee-9d53-4a52-b797-1f8ccbf78076
+
+  const now = new Date();
+  const createdAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + 12 * 60 * 60 * 1000).toISOString();
+
+  db.run(
+    `
+    INSERT INTO admin_keys (key, created_at, expires_at)
+    VALUES (?, ?, ?)
+  `,
+    [key, createdAt, expiresAt],
+    function (err) {
+      if (err) {
+        console.error('Failed to create admin key:', err);
+        return res.status(500).json({ error: 'Failed to create admin key' });
+      }
+      res.json({ key, expires_at: expiresAt });
     }
   );
 });
 
-// ===============================
+// POST /api/admin/login
+// Body: { key }  -> returns { token }
+app.post('/api/admin/login', (req, res) => {
+  const { key } = req.body;
+
+  if (!key) {
+    return res.status(400).json({ error: 'Key is required' });
+  }
+
+  db.get(
+    `SELECT * FROM admin_keys WHERE key = ?`,
+    [key],
+    (err, row) => {
+      if (err) {
+        console.error('Admin key lookup failed:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+
+      if (!row) {
+        return res.status(401).json({ error: 'Invalid key' });
+      }
+
+      const now = new Date();
+      if (new Date(row.expires_at) < now) {
+        return res.status(401).json({ error: 'Key expired' });
+      }
+
+      // single-use behaviour; if you want multiple uses, you can remove this block
+      if (row.used) {
+        return res.status(401).json({ error: 'Key already used' });
+      }
+
+      db.run(`UPDATE admin_keys SET used = 1 WHERE id = ?`, [row.id]);
+
+      const token = randomUUID();
+      ADMIN_SESSIONS.set(token, {
+        key,
+        createdAt: now.toISOString()
+      });
+
+      res.json({ token });
+    }
+  );
+});
+
+// Middleware: require admin session
+function requireAdmin(req, res, next) {
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.startsWith('Bearer ')
+    ? authHeader.slice(7)
+    : null;
+
+  if (!token) {
+    return res.status(401).json({ error: 'Admin token required' });
+  }
+
+  const session = ADMIN_SESSIONS.get(token);
+  if (!session) {
+    return res.status(401).json({ error: 'Invalid or expired admin session' });
+  }
+
+  // Optional: enforce session max lifetime if you want:
+  // const createdAt = new Date(session.createdAt);
+  // if (Date.now() - createdAt.getTime() > 12 * 60 * 60 * 1000) { ... }
+
+  next();
+}
+
+// Example admin-only route: list all users
+app.get('/api/admin/users', requireAdmin, (req, res) => {
+  db.all(`SELECT * FROM users`, (err, rows) => {
+    if (err) {
+      console.error('Admin users list error:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    res.json(rows);
+  });
+});
+
+// Example admin-only route: fetch all admin keys
+app.get('/api/admin/keys', requireAdmin, (req, res) => {
+  db.all(
+    `SELECT id, key, created_at, expires_at, used FROM admin_keys ORDER BY created_at DESC`,
+    (err, rows) => {
+      if (err) {
+        console.error('Admin keys list error:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+      res.json(rows);
+    }
+  );
+});
+
+// =============================
 // START SERVER
-// ===============================
+// =============================
 app.listen(PORT, () => {
-  console.log(`USAFE backend running on http://localhost:${PORT}`);
+  console.log(`USAFFE backend listening on port ${PORT}`);
 });
