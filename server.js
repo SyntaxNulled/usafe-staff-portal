@@ -90,6 +90,31 @@ app.get('/', (req, res) => {
 });
 
 // ===============================
+// AVATAR PROXY (Fixes Roblox CORS)
+// ===============================
+app.get('/api/avatar/:robloxId', async (req, res) => {
+  const { robloxId } = req.params;
+
+  const url = `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${robloxId}&size=150x150&format=Png&isCircular=false`;
+
+  try {
+    const response = await fetch(url);
+    const data = await response.json();
+
+    const imageUrl = data?.data?.[0]?.imageUrl;
+
+    if (!imageUrl) {
+      return res.status(404).json({ error: 'Avatar not found' });
+    }
+
+    res.json({ imageUrl });
+  } catch (err) {
+    console.error('Avatar proxy failed:', err);
+    res.status(500).json({ error: 'Failed to fetch avatar' });
+  }
+});
+
+// ===============================
 // USER PROFILE
 // ===============================
 app.get('/api/users/:robloxId', (req, res) => {
@@ -142,6 +167,8 @@ app.get('/api/users/:robloxId', (req, res) => {
 // ===============================
 // STAFF PANEL ROUTES
 // ===============================
+
+// Create training (original)
 app.post('/api/trainings', (req, res) => {
   const { type, date, host_id } = req.body;
 
@@ -155,6 +182,21 @@ app.post('/api/trainings', (req, res) => {
   );
 });
 
+// Create training (alias for frontend compatibility)
+app.post('/api/trainings/create', (req, res) => {
+  const { type, date, host_id } = req.body;
+
+  db.run(
+    `INSERT INTO trainings (type, date, host_id) VALUES (?, ?, ?)`,
+    [type, date, host_id],
+    function (err) {
+      if (err) return res.status(500).json({ error: 'Failed to create training' });
+      res.json({ success: true, training_id: this.lastID });
+    }
+  );
+});
+
+// Add attendees
 app.post('/api/trainings/:trainingId/attendees', (req, res) => {
   const { trainingId } = req.params;
   const { attendees } = req.body;
@@ -173,6 +215,7 @@ app.post('/api/trainings/:trainingId/attendees', (req, res) => {
   });
 });
 
+// Award medal
 app.post('/api/medals/award', (req, res) => {
   const { medal_id, user_id, awarded_by, reason } = req.body;
   const date = new Date().toISOString();
@@ -188,6 +231,7 @@ app.post('/api/medals/award', (req, res) => {
   );
 });
 
+// Adjust points / valor
 app.post('/api/users/:userId/adjust', (req, res) => {
   const { userId } = req.params;
   const { pointsDelta = 0, valorDelta = 0 } = req.body;
@@ -202,6 +246,7 @@ app.post('/api/users/:userId/adjust', (req, res) => {
   );
 });
 
+// Promote user
 app.post('/api/users/:userId/promote', (req, res) => {
   const { userId } = req.params;
   const { newRank } = req.body;
@@ -217,31 +262,25 @@ app.post('/api/users/:userId/promote', (req, res) => {
 });
 
 // ===============================
-// COMMAND STATUS
+// COMMAND STATUS (for Staff Panel)
 // ===============================
-app.get('/api/status', (req, res) => {
+app.get('/api/admin/stats', (req, res) => {
   const today = new Date().toISOString().split('T')[0];
   const status = {};
 
   db.get(`SELECT COUNT(*) AS count FROM users`, (err, row) => {
-    status.activePersonnel = row ? row.count : 0;
+    status.active_personnel = row ? row.count : 0;
 
     db.get(
       `SELECT COUNT(*) AS count FROM trainings WHERE date LIKE ?`,
       [`${today}%`],
       (err2, row2) => {
-        status.trainingsToday = row2 ? row2.count : 0;
+        status.trainings_today = row2 ? row2.count : 0;
 
         db.get(`SELECT COUNT(*) AS count FROM medal_awards`, (err3, row3) => {
-          status.medalsAwarded = row3 ? row3.count : 0;
+          status.medals_awarded = row3 ? row3.count : 0;
 
-          db.get(
-            `SELECT rank FROM users WHERE rank IS NOT NULL AND rank != '' ORDER BY id DESC LIMIT 1`,
-            (err4, row4) => {
-              status.currentRank = row4 && row4.rank ? row4.rank : 'Unknown';
-              res.json(status);
-            }
-          );
+          res.json(status);
         });
       }
     );
