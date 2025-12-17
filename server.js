@@ -2,7 +2,7 @@ const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
 const path = require('path');
-const fetch = require('node-fetch'); // Required for Roblox API
+const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -10,13 +10,12 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
-// Database setup
+// ===============================
+// DATABASE SETUP
+// ===============================
 const dbPath = path.join(__dirname, 'usafe.db');
 const db = new sqlite3.Database(dbPath);
 
-// ===============================
-// DATABASE TABLES
-// ===============================
 db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
@@ -74,7 +73,6 @@ db.serialize(() => {
     )
   `);
 
-  // Roblox verification codes
   db.run(`
     CREATE TABLE IF NOT EXISTS verification_codes (
       roblox_id TEXT PRIMARY KEY,
@@ -91,29 +89,9 @@ app.get('/', (req, res) => {
   res.json({ message: 'USAFE backend running' });
 });
 
-// Create or update a user
-app.post('/api/users', (req, res) => {
-  const { roblox_id, username, display_name, branch, rank } = req.body;
-
-  db.run(
-    `
-    INSERT INTO users (roblox_id, username, display_name, branch, rank)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(roblox_id) DO UPDATE SET
-      username = excluded.username,
-      display_name = excluded.display_name,
-      branch = excluded.branch,
-      rank = excluded.rank
-  `,
-    [roblox_id, username, display_name, branch, rank],
-    function (err) {
-      if (err) return res.status(500).json({ error: 'Failed to upsert user' });
-      res.json({ success: true });
-    }
-  );
-});
-
-// Get user profile
+// ===============================
+// USER PROFILE
+// ===============================
 app.get('/api/users/:robloxId', (req, res) => {
   const { robloxId } = req.params;
 
@@ -164,8 +142,6 @@ app.get('/api/users/:robloxId', (req, res) => {
 // ===============================
 // STAFF PANEL ROUTES
 // ===============================
-
-// Create training
 app.post('/api/trainings', (req, res) => {
   const { type, date, host_id } = req.body;
 
@@ -179,7 +155,6 @@ app.post('/api/trainings', (req, res) => {
   );
 });
 
-// Add attendees
 app.post('/api/trainings/:trainingId/attendees', (req, res) => {
   const { trainingId } = req.params;
   const { attendees } = req.body;
@@ -198,7 +173,6 @@ app.post('/api/trainings/:trainingId/attendees', (req, res) => {
   });
 });
 
-// Award medal
 app.post('/api/medals/award', (req, res) => {
   const { medal_id, user_id, awarded_by, reason } = req.body;
   const date = new Date().toISOString();
@@ -214,7 +188,6 @@ app.post('/api/medals/award', (req, res) => {
   );
 });
 
-// Adjust points/valor
 app.post('/api/users/:userId/adjust', (req, res) => {
   const { userId } = req.params;
   const { pointsDelta = 0, valorDelta = 0 } = req.body;
@@ -229,7 +202,6 @@ app.post('/api/users/:userId/adjust', (req, res) => {
   );
 });
 
-// Promote user
 app.post('/api/users/:userId/promote', (req, res) => {
   const { userId } = req.params;
   const { newRank } = req.body;
@@ -245,7 +217,7 @@ app.post('/api/users/:userId/promote', (req, res) => {
 });
 
 // ===============================
-// COMMAND STATUS ROUTE
+// COMMAND STATUS
 // ===============================
 app.get('/api/status', (req, res) => {
   const today = new Date().toISOString().split('T')[0];
@@ -277,10 +249,8 @@ app.get('/api/status', (req, res) => {
 });
 
 // ===============================
-// ROBLOX VERIFICATION LOGIN
+// ROBLOX BIO VERIFICATION LOGIN
 // ===============================
-
-// Generate verification code
 function generateVerificationCode() {
   return 'USAFE-' + Math.random().toString(36).substring(2, 8).toUpperCase();
 }
@@ -315,7 +285,6 @@ app.post('/api/roblox/lookup', async (req, res) => {
       display_name: user.displayName
     });
   } catch (err) {
-    console.error('Roblox lookup error:', err);
     res.status(500).json({ error: 'Failed to contact Roblox' });
   }
 });
@@ -327,7 +296,7 @@ app.post('/api/roblox/start-verification', (req, res) => {
   if (!roblox_id) return res.status(400).json({ error: 'roblox_id is required' });
 
   const code = generateVerificationCode();
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
   db.run(
     `
@@ -339,15 +308,9 @@ app.post('/api/roblox/start-verification', (req, res) => {
   `,
     [roblox_id, code, expiresAt],
     function (err) {
-      if (err) {
-        console.error('Failed to store verification code:', err);
-        return res.status(500).json({ error: 'Failed to start verification' });
-      }
+      if (err) return res.status(500).json({ error: 'Failed to start verification' });
 
-      res.json({
-        success: true,
-        code
-      });
+      res.json({ success: true, code });
     }
   );
 });
@@ -363,30 +326,24 @@ app.post('/api/roblox/check', async (req, res) => {
     [roblox_id],
     async (err, row) => {
       if (err || !row) {
-        return res.status(400).json({ error: 'No verification code found for this user' });
+        return res.status(400).json({ error: 'No verification code found' });
       }
 
       const { code, expires_at } = row;
-      const now = new Date();
 
-      if (new Date(expires_at) < now) {
+      if (new Date(expires_at) < new Date()) {
         return res.status(400).json({ error: 'Verification code expired' });
       }
 
       try {
         const response = await fetch(`https://users.roblox.com/v1/users/${roblox_id}`);
-        if (!response.ok) {
-          return res.status(500).json({ error: 'Failed to fetch Roblox user profile' });
-        }
-
         const userData = await response.json();
-        const description = userData.description || '';
+        const bio = userData.description || '';
 
-        if (!description.includes(code)) {
-          return res.status(400).json({ error: 'Verification code not found in Roblox bio' });
+        if (!bio.includes(code)) {
+          return res.status(400).json({ error: 'Code not found in Roblox bio' });
         }
 
-        // Verified. Upsert user.
         const username = userData.name;
         const display_name = userData.displayName;
 
@@ -399,20 +356,9 @@ app.post('/api/roblox/check', async (req, res) => {
             display_name = excluded.display_name
         `,
           [roblox_id, username, display_name],
-          function (upsertErr) {
-            if (upsertErr) {
-              console.error('Failed to upsert verified user:', upsertErr);
-              return res.status(500).json({ error: 'Failed to save user' });
-            }
+          function () {
+            db.run(`DELETE FROM verification_codes WHERE roblox_id = ?`, [roblox_id]);
 
-            // Delete verification code
-            db.run(
-              `DELETE FROM verification_codes WHERE roblox_id = ?`,
-              [roblox_id],
-              () => {}
-            );
-
-            // Simple token
             const token = `roblox_${roblox_id}_${Date.now()}`;
 
             res.json({
@@ -425,7 +371,6 @@ app.post('/api/roblox/check', async (req, res) => {
           }
         );
       } catch (e) {
-        console.error('Roblox check error:', e);
         res.status(500).json({ error: 'Failed to verify with Roblox' });
       }
     }
