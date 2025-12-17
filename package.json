@@ -1,6 +1,7 @@
 {
-  "name": "usafe-backend",
+  "name": "usaffe-backend",
   "version": "1.0.0",
+  "description": "Backend server for the USAFFE Command Network",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
