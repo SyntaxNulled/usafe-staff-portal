@@ -579,6 +579,6 @@ app.get('/api/admin/keys', requireAdmin, (req, res) => {
 // =============================
 // START SERVER
 // =============================
-app.listen(PORT, () => {
-  console.log(`USAFFE backend listening on port ${PORT}`);
+app.get('/', (req, res) => {
+  res.send('✅ USAFFE backend is running and accepting requests.');
 });
