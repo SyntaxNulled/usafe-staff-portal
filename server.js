@@ -9,7 +9,7 @@
 //   node server.js
 //
 // The API base URL you’ve been using from frontend:
-//   https://usafe-backend.onrender.com  (on Render)
+//   https://usafe-staff-portal.onrender.com  (on Render)
 //
 
 const express = require('express');
@@ -105,7 +105,6 @@ db.serialize(() => {
 // =============================
 
 function getUserByIdOrRobloxId(idOrRobloxId, cb) {
-  // If it’s all digits and relatively long, treat as roblox_id; otherwise allow both
   db.get(
     `
     SELECT *
@@ -149,11 +148,9 @@ function ensureUserByRobloxProfile(robloxId, username, displayName, cb) {
 // =============================
 // AVATAR PROXY
 // =============================
-// GET /api/avatar/:robloxId
 app.get('/api/avatar/:robloxId', async (req, res) => {
   const { robloxId } = req.params;
   try {
-    // Roblox avatar thumbnail API
     const resp = await axios.get(
       'https://thumbnails.roblox.com/v1/users/avatar-headshot',
       {
@@ -190,27 +187,17 @@ app.get('/api/avatar/:robloxId', async (req, res) => {
 // USER ROUTES
 // =============================
 
-// GET /api/users/:idOrRobloxId
 app.get('/api/users/:idOrRobloxId', (req, res) => {
   const { idOrRobloxId } = req.params;
   getUserByIdOrRobloxId(idOrRobloxId, (err, user) => {
-    if (err) {
-      console.error('User lookup error:', err);
-      return res.status(500).json({ error: 'Database error' });
-    }
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    if (err) return res.status(500).json({ error: 'Database error' });
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
-    // Fetch medals and trainings for this user
     db.all(
       `SELECT * FROM medals WHERE user_roblox_id = ? ORDER BY date DESC`,
       [user.roblox_id],
       (mErr, medals) => {
-        if (mErr) {
-          console.error('Medals lookup error:', mErr);
-          return res.status(500).json({ error: 'Database error' });
-        }
+        if (mErr) return res.status(500).json({ error: 'Database error' });
 
         db.all(
           `
@@ -222,10 +209,7 @@ app.get('/api/users/:idOrRobloxId', (req, res) => {
         `,
           [user.roblox_id],
           (tErr, trainings) => {
-            if (tErr) {
-              console.error('Trainings lookup error:', tErr);
-              return res.status(500).json({ error: 'Database error' });
-            }
+            if (tErr) return res.status(500).json({ error: 'Database error' });
 
             res.json({
               ...user,
@@ -239,8 +223,6 @@ app.get('/api/users/:idOrRobloxId', (req, res) => {
   });
 });
 
-// POST /api/users/:idOrRobloxId/adjust
-// Body: { combatDelta }
 app.post('/api/users/:idOrRobloxId/adjust', (req, res) => {
   const { idOrRobloxId } = req.params;
   const { combatDelta } = req.body;
@@ -250,31 +232,21 @@ app.post('/api/users/:idOrRobloxId/adjust', (req, res) => {
   }
 
   getUserByIdOrRobloxId(idOrRobloxId, (err, user) => {
-    if (err) {
-      console.error('User lookup error:', err);
-      return res.status(500).json({ error: 'Database error' });
-    }
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    if (err) return res.status(500).json({ error: 'Database error' });
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
     const newCombat = (user.combat_points || 0) + combatDelta;
     db.run(
       `UPDATE users SET combat_points = ? WHERE id = ?`,
       [newCombat, user.id],
       (uErr) => {
-        if (uErr) {
-          console.error('Combat update error:', uErr);
-          return res.status(500).json({ error: 'Database error' });
-        }
+        if (uErr) return res.status(500).json({ error: 'Database error' });
         res.json({ success: true, new_combat_points: newCombat });
       }
     );
   });
 });
 
-// POST /api/users/:idOrRobloxId/promote
-// Body: { newRank }
 app.post('/api/users/:idOrRobloxId/promote', (req, res) => {
   const { idOrRobloxId } = req.params;
   const { newRank } = req.body;
@@ -284,22 +256,14 @@ app.post('/api/users/:idOrRobloxId/promote', (req, res) => {
   }
 
   getUserByIdOrRobloxId(idOrRobloxId, (err, user) => {
-    if (err) {
-      console.error('User lookup error:', err);
-      return res.status(500).json({ error: 'Database error' });
-    }
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    if (err) return res.status(500).json({ error: 'Database error' });
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
     db.run(
       `UPDATE users SET rank = ? WHERE id = ?`,
       [newRank, user.id],
       (uErr) => {
-        if (uErr) {
-          console.error('Rank update error:', uErr);
-          return res.status(500).json({ error: 'Database error' });
-        }
+        if (uErr) return res.status(500).json({ error: 'Database error' });
         res.json({ success: true, rank: newRank });
       }
     );
@@ -310,8 +274,6 @@ app.post('/api/users/:idOrRobloxId/promote', (req, res) => {
 // TRAININGS
 // =============================
 
-// POST /api/trainings/create
-// Body: { type, date, host_id }
 app.post('/api/trainings/create', (req, res) => {
   const { type, date, host_id } = req.body;
 
@@ -326,10 +288,8 @@ app.post('/api/trainings/create', (req, res) => {
   `,
     [type, date, host_id],
     function (err) {
-      if (err) {
-        console.error('Training create error:', err);
-        return res.status(500).json({ error: 'Database error' });
-      }
+      if (err) return res.status(500).json({ error: 'Database error' });
+
       res.json({
         training_id: this.lastID,
         type,
@@ -340,8 +300,6 @@ app.post('/api/trainings/create', (req, res) => {
   );
 });
 
-// POST /api/trainings/:trainingId/attendees
-// Body: { attendees: [ "robloxId1", "robloxId2", ... ] }
 app.post('/api/trainings/:trainingId/attendees', (req, res) => {
   const { trainingId } = req.params;
   const { attendees } = req.body;
@@ -351,13 +309,8 @@ app.post('/api/trainings/:trainingId/attendees', (req, res) => {
   }
 
   db.get(`SELECT * FROM trainings WHERE id = ?`, [trainingId], (err, tRow) => {
-    if (err) {
-      console.error('Training lookup error:', err);
-      return res.status(500).json({ error: 'Database error' });
-    }
-    if (!tRow) {
-      return res.status(404).json({ error: 'Training not found' });
-    }
+    if (err) return res.status(500).json({ error: 'Database error' });
+    if (!tRow) return res.status(404).json({ error: 'Training not found' });
 
     const stmt = db.prepare(`
       INSERT INTO training_attendees (training_id, attendee_roblox_id)
@@ -369,10 +322,7 @@ app.post('/api/trainings/:trainingId/attendees', (req, res) => {
     });
 
     stmt.finalize((fErr) => {
-      if (fErr) {
-        console.error('Attendee insert error:', fErr);
-        return res.status(500).json({ error: 'Database error' });
-      }
+      if (fErr) return res.status(500).json({ error: 'Database error' });
       res.json({ success: true });
     });
   });
@@ -382,18 +332,13 @@ app.post('/api/trainings/:trainingId/attendees', (req, res) => {
 // MEDALS
 // =============================
 
-// POST /api/medals/award
-// Body: { medal_id, user_roblox_id, awarded_by_roblox_id, reason }
 app.post('/api/medals/award', (req, res) => {
   const { medal_id, user_roblox_id, awarded_by_roblox_id, reason } = req.body;
 
   if (!medal_id || !user_roblox_id || !awarded_by_roblox_id || !reason) {
-    return res
-      .status(400)
-      .json({ error: 'medal_id, user_roblox_id, awarded_by_roblox_id, and reason are required' });
+    return res.status(400).json({ error: 'medal_id, user_roblox_id, awarded_by_roblox_id, and reason are required' });
   }
 
-  // For now we just store medal_id as given and a generic name based on ID
   const medalName = `Medal #${medal_id}`;
 
   db.run(
@@ -403,10 +348,8 @@ app.post('/api/medals/award', (req, res) => {
   `,
     [user_roblox_id, medal_id, medalName, reason, awarded_by_roblox_id],
     function (err) {
-      if (err) {
-        console.error('Medal award error:', err);
-        return res.status(500).json({ error: 'Database error' });
-      }
+      if (err) return res.status(500).json({ error: 'Database error' });
+
       res.json({ success: true, medal_record_id: this.lastID });
     }
   );
@@ -416,7 +359,6 @@ app.post('/api/medals/award', (req, res) => {
 // COMMAND STATS
 // =============================
 
-// GET /api/admin/stats
 app.get('/api/admin/stats', (req, res) => {
   const stats = {
     active_personnel: 0,
@@ -424,11 +366,9 @@ app.get('/api/admin/stats', (req, res) => {
     medals_awarded: 0
   };
 
-  // active_personnel = count of users
   db.get(`SELECT COUNT(*) as cnt FROM users`, (err, row) => {
     if (!err && row) stats.active_personnel = row.cnt || 0;
 
-    // trainings_today
     db.get(
       `
       SELECT COUNT(*) as cnt
@@ -438,7 +378,6 @@ app.get('/api/admin/stats', (req, res) => {
       (tErr, tRow) => {
         if (!tErr && tRow) stats.trainings_today = tRow.cnt || 0;
 
-        // medals_awarded (total)
         db.get(
           `SELECT COUNT(*) as cnt FROM medals`,
           (mErr, mRow) => {
@@ -456,12 +395,10 @@ app.get('/api/admin/stats', (req, res) => {
 // =============================
 
 const { randomUUID } = require('crypto');
-const ADMIN_SESSIONS = new Map(); // token -> { key, createdAt }
+const ADMIN_SESSIONS = new Map();
 
-// POST /api/admin-keys/create
-// Generates a new 12-hour key
 app.post('/api/admin-keys/create', (req, res) => {
-  const key = randomUUID(); // e.g. 6b29c8ee-9d53-4a52-b797-1f8ccbf78076
+  const key = randomUUID();
 
   const now = new Date();
   const createdAt = now.toISOString();
@@ -474,17 +411,13 @@ app.post('/api/admin-keys/create', (req, res) => {
   `,
     [key, createdAt, expiresAt],
     function (err) {
-      if (err) {
-        console.error('Failed to create admin key:', err);
-        return res.status(500).json({ error: 'Failed to create admin key' });
-      }
+      if (err) return res.status(500).json({ error: 'Failed to create admin key' });
+
       res.json({ key, expires_at: expiresAt });
     }
   );
 });
 
-// POST /api/admin/login
-// Body: { key }  -> returns { token }
 app.post('/api/admin/login', (req, res) => {
   const { key } = req.body;
 
@@ -496,21 +429,15 @@ app.post('/api/admin/login', (req, res) => {
     `SELECT * FROM admin_keys WHERE key = ?`,
     [key],
     (err, row) => {
-      if (err) {
-        console.error('Admin key lookup failed:', err);
-        return res.status(500).json({ error: 'Database error' });
-      }
+      if (err) return res.status(500).json({ error: 'Database error' });
 
-      if (!row) {
-        return res.status(401).json({ error: 'Invalid key' });
-      }
+      if (!row) return res.status(401).json({ error: 'Invalid key' });
 
       const now = new Date();
       if (new Date(row.expires_at) < now) {
         return res.status(401).json({ error: 'Key expired' });
       }
 
-      // single-use behaviour; if you want multiple uses, you can remove this block
       if (row.used) {
         return res.status(401).json({ error: 'Key already used' });
       }
@@ -528,7 +455,6 @@ app.post('/api/admin/login', (req, res) => {
   );
 });
 
-// Middleware: require admin session
 function requireAdmin(req, res, next) {
   const authHeader = req.headers['authorization'] || '';
   const token = authHeader.startsWith('Bearer ')
@@ -544,33 +470,21 @@ function requireAdmin(req, res, next) {
     return res.status(401).json({ error: 'Invalid or expired admin session' });
   }
 
-  // Optional: enforce session max lifetime if you want:
-  // const createdAt = new Date(session.createdAt);
-  // if (Date.now() - createdAt.getTime() > 12 * 60 * 60 * 1000) { ... }
-
   next();
 }
 
-// Example admin-only route: list all users
 app.get('/api/admin/users', requireAdmin, (req, res) => {
   db.all(`SELECT * FROM users`, (err, rows) => {
-    if (err) {
-      console.error('Admin users list error:', err);
-      return res.status(500).json({ error: 'Database error' });
-    }
+    if (err) return res.status(500).json({ error: 'Database error' });
     res.json(rows);
   });
 });
 
-// Example admin-only route: fetch all admin keys
 app.get('/api/admin/keys', requireAdmin, (req, res) => {
   db.all(
     `SELECT id, key, created_at, expires_at, used FROM admin_keys ORDER BY created_at DESC`,
     (err, rows) => {
-      if (err) {
-        console.error('Admin keys list error:', err);
-        return res.status(500).json({ error: 'Database error' });
-      }
+      if (err) return res.status(500).json({ error: 'Database error' });
       res.json(rows);
     }
   );
@@ -581,4 +495,8 @@ app.get('/api/admin/keys', requireAdmin, (req, res) => {
 // =============================
 app.get('/', (req, res) => {
   res.send('✅ USAFFE backend is running and accepting requests.');
+});
+
+app.listen(PORT, () => {
+  console.log(`USAFFE backend listening on port ${PORT}`);
 });
